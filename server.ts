@@ -1,28 +1,495 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import {
-  BingoBall,
-  BingoCard,
-  BingoClaim,
-  BlockedCard,
-  CardRegistration,
-  GameSession,
-  User,
-  Winner,
-  WinningPattern,
-  AuditLogEntry,
-  HistoricalGame,
-  SystemSettings,
-} from './src/types/bingo.js';
-import {
-  createBall,
-  generateBingoCard,
-  verifyClaimAuthoritative,
-  WINNING_RULE_LABELS,
-} from './src/utils/bingoRules.js';
+export type BingoColumn = 'B' | 'I' | 'N' | 'G' | 'O';
+
+export interface BingoBall {
+  letter: BingoColumn;
+  number: number;
+  color: string;
+  calledAt: number;
+  sequence: number;
+}
+
+export type WinningPattern =
+  | 'not_set'
+  | 'horizontal_line'
+  | 'vertical_line'
+  | 'diagonal_line'
+  | 'four_corners'
+  | 'blackout';
+
+export type GameStatus =
+  | 'next_game'
+  | 'setup'
+  | 'registration_open'
+  | 'registration_closed'
+  | 'starting_countdown'
+  | 'running'
+  | 'paused'
+  | 'stopped'
+  | 'claim_review'
+  | 'game_completed'
+  | 'cancelled'
+  | 'ready_to_start'
+  | 'pre_game_countdown'
+  | 'in_progress'
+  | 'checking_winners'
+  | 'winner_confirmed'
+  | 'completed';
+
+export interface BingoCard {
+  id: string;
+  gameId: string;
+  gameCode?: string;
+  userId: string;
+  matrix: (number | 'FREE')[][];
+  marked: boolean[][];
+  isRegistered: boolean;
+  registeredAt?: number;
+  isBlocked: boolean;
+  blockReason?: string;
+  createdAt: number;
+  cardDateString: string;
+  isArchived?: boolean;
+}
+
+export interface CardRegistration {
+  id: string;
+  gameId: string;
+  gameCode: string;
+  cardId: string;
+  userId: string;
+  registeredAt: number;
+}
+
+export interface BlockedCard {
+  cardId: string;
+  gameId: string;
+  userId?: string;
+  reason: string;
+  status: 'blocked' | 'under_review';
+  blockedAt: number;
+  blockedBy: string;
+}
+
+export interface Winner {
+  id: string;
+  gameId: string;
+  claimId: string;
+  cardId: string;
+  userId: string;
+  displayName: string;
+  winningPattern: string;
+  prizeCategory: string;
+  prizeAmount: number;
+  confirmedAt: number;
+  cardMatrix?: (number | 'FREE')[][];
+  calledNumbersAtWin?: number[];
+  winningCoordinates?: [number, number][];
+}
+
+export interface BingoClaim {
+  id: string;
+  gameId: string;
+  cardId: string;
+  userId: string;
+  userName: string;
+  pattern: WinningPattern;
+  status: 'submitted' | 'under_verification' | 'confirmed' | 'rejected';
+  prizeCategory: string;
+  prizeAmount: number;
+  submittedAt: number;
+  verifiedAt?: number;
+  rejectionReason?: string;
+}
+
+export interface PrizeTier {
+  category: string;
+  amount: number;
+  pattern: WinningPattern;
+}
+
+export interface GameSession {
+  id: string;
+  gameCode: string;
+  title: string;
+  gameType: string;
+  status: GameStatus;
+  activeWinningRule: WinningPattern;
+  isRuleLocked: boolean;
+  registrationOpen: boolean;
+  startTime: string;
+  entryPrice: number;
+  individualPrize: number;
+  totalPrizePool: number;
+  prizes: PrizeTier[];
+  registeredPlayersCount: number;
+  hostName: string;
+  hostId: string;
+  announcements: string[];
+  calledNumbers: BingoBall[];
+  currentNumber: BingoBall | null;
+  blockedCards: BlockedCard[];
+  winners: Winner[];
+  autoCallActive: boolean;
+  autoCallIntervalSeconds: number;
+  maxCardsPerPlayer: number;
+  countdownDeadline?: number;
+  numberCallingStartTimestamp?: number;
+  claimWindowDeadline?: number;
+  claimWindowActive?: boolean;
+  completionDeadline?: number;
+  isServiceSuspended?: boolean;
+}
+
+export interface User {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  role: 'player' | 'host' | 'admin';
+  balance: number;
+  stats: {
+    gamesPlayed: number;
+    bingosWon: number;
+    cardsPlayed: number;
+  };
+}
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: number;
+  actorId: string;
+  actorName: string;
+  actorRole: 'admin' | 'host' | 'system' | 'player';
+  action: string;
+  entityType: 'game' | 'card' | 'claim' | 'winner' | 'player' | 'settings';
+  entityId?: string;
+  details: string;
+  severity?: 'info' | 'warning' | 'critical';
+}
+
+export interface HistoricalGame {
+  id: string;
+  gameCode: string;
+  title: string;
+  completedAt: number;
+  durationMinutes: number;
+  winningRule: WinningPattern;
+  ballsCalledCount: number;
+  registeredPlayersCount: number;
+  totalCardsCount: number;
+  individualPrize?: number;
+  prizePool: number;
+  status: 'completed' | 'cancelled';
+  winners: Winner[];
+  ballSequence: BingoBall[];
+}
+
+export interface SystemSettings {
+  defaultAutoCallInterval: number;
+  maxCardsPerPlayer: number;
+  claimWindowDurationSeconds: number;
+  countdownDurationSeconds: number;
+  autoCallInitialDelaySeconds: number;
+  defaultPrizeAmount: number;
+  defaultEntryPrice: number;
+  requireManualClaimVerification: boolean;
+  autoBlockFalseClaims: boolean;
+  announcementsEnabled: boolean;
+  maintenanceMode: boolean;
+}
+
+export const COLUMN_RANGES: Record<BingoColumn, { min: number; max: number }> = {
+  B: { min: 1, max: 15 },
+  I: { min: 16, max: 30 },
+  N: { min: 31, max: 45 },
+  G: { min: 46, max: 60 },
+  O: { min: 61, max: 75 },
+};
+
+export const COLUMN_COLORS: Record<BingoColumn, { bg: string; text: string; border: string; hex: string }> = {
+  B: { bg: 'bg-blue-600', text: 'text-blue-600', border: 'border-blue-600', hex: '#2563eb' },
+  I: { bg: 'bg-rose-600', text: 'text-rose-600', border: 'border-rose-600', hex: '#e11d48' },
+  N: { bg: 'bg-emerald-600', text: 'text-emerald-600', border: 'border-emerald-600', hex: '#059669' },
+  G: { bg: 'bg-purple-600', text: 'text-purple-600', border: 'border-purple-600', hex: '#9333ea' },
+  O: { bg: 'bg-amber-500', text: 'text-amber-500', border: 'border-amber-500', hex: '#d97706' },
+};
+
+export const WINNING_RULE_LABELS: Record<WinningPattern, string> = {
+  not_set: 'Not Set',
+  horizontal_line: 'Horizontal Line (Any complete row)',
+  vertical_line: 'Vertical Line (Any complete column)',
+  diagonal_line: 'Diagonal Line (Corner to corner)',
+  four_corners: 'Four Corners (All 4 outer corners)',
+  blackout: 'Full Card / Blackout (All 25 squares)',
+};
+
+export function getLetterForNumber(num: number): BingoColumn {
+  if (num >= 1 && num <= 15) return 'B';
+  if (num >= 16 && num <= 30) return 'I';
+  if (num >= 31 && num <= 45) return 'N';
+  if (num >= 46 && num <= 60) return 'G';
+  if (num >= 61 && num <= 75) return 'O';
+  throw new Error(`Invalid bingo number: ${num}. Must be 1-75.`);
+}
+
+export function createBall(num: number, sequence: number = 1): BingoBall {
+  const letter = getLetterForNumber(num);
+  return {
+    letter,
+    number: num,
+    color: COLUMN_COLORS[letter].hex,
+    calledAt: Date.now(),
+    sequence,
+  };
+}
+
+function getRandomInts(min: number, max: number, count: number): number[] {
+  const pool: number[] = [];
+  for (let i = min; i <= max; i++) pool.push(i);
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, count);
+}
+
+export function generateBingoCard(
+  gameId: string,
+  userId: string,
+  cardIndex: number,
+  isRegistered: boolean = false
+): BingoCard {
+  const cardId = `CARD-${Math.floor(1000 + Math.random() * 9000)}-${cardIndex}`;
+
+  const colB = getRandomInts(1, 15, 5);
+  const colI = getRandomInts(16, 30, 5);
+  const colN = getRandomInts(31, 45, 5);
+  const colG = getRandomInts(46, 60, 5);
+  const colO = getRandomInts(61, 75, 5);
+
+  const matrix: (number | 'FREE')[][] = [];
+  const marked: boolean[][] = [];
+
+  for (let r = 0; r < 5; r++) {
+    const rowNumbers: (number | 'FREE')[] = [
+      colB[r],
+      colI[r],
+      r === 2 ? 'FREE' : colN[r],
+      colG[r],
+      colO[r],
+    ];
+    matrix.push(rowNumbers);
+    marked.push([false, false, r === 2, false, false]);
+  }
+
+  const now = new Date();
+  const cardDateString = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+    now.getDate()
+  ).padStart(2, '0')}`;
+
+  return {
+    id: cardId,
+    gameId,
+    userId,
+    matrix,
+    marked,
+    isRegistered,
+    registeredAt: isRegistered ? Date.now() : undefined,
+    isBlocked: false,
+    createdAt: Date.now(),
+    cardDateString,
+    isArchived: false,
+  };
+}
+
+export interface PatternCheckResult {
+  isWon: boolean;
+  patternName: string;
+  winningCoordinates: [number, number][];
+}
+
+export function checkWinningPattern(
+  marked: boolean[][],
+  pattern: WinningPattern
+): PatternCheckResult {
+  const isMarked = (r: number, c: number) => (r === 2 && c === 2) || !!marked[r]?.[c];
+
+  const horizontalWins: [number, number][][] = [];
+  for (let r = 0; r < 5; r++) {
+    let rowWon = true;
+    const coords: [number, number][] = [];
+    for (let c = 0; c < 5; c++) {
+      if (!isMarked(r, c)) {
+        rowWon = false;
+        break;
+      }
+      coords.push([r, c]);
+    }
+    if (rowWon) horizontalWins.push(coords);
+  }
+
+  const verticalWins: [number, number][][] = [];
+  for (let c = 0; c < 5; c++) {
+    let colWon = true;
+    const coords: [number, number][] = [];
+    for (let r = 0; r < 5; r++) {
+      if (!isMarked(r, c)) {
+        colWon = false;
+        break;
+      }
+      coords.push([r, c]);
+    }
+    if (colWon) verticalWins.push(coords);
+  }
+
+  const diag1Coords: [number, number][] = [];
+  let diag1Won = true;
+  for (let i = 0; i < 5; i++) {
+    if (!isMarked(i, i)) {
+      diag1Won = false;
+      break;
+    }
+    diag1Coords.push([i, i]);
+  }
+
+  const diag2Coords: [number, number][] = [];
+  let diag2Won = true;
+  for (let i = 0; i < 5; i++) {
+    if (!isMarked(i, 4 - i)) {
+      diag2Won = false;
+      break;
+    }
+    diag2Coords.push([i, 4 - i]);
+  }
+
+  const fourCornersCoords: [number, number][] = [
+    [0, 0],
+    [0, 4],
+    [4, 0],
+    [4, 4],
+  ];
+  const fourCornersWon = fourCornersCoords.every(([r, c]) => isMarked(r, c));
+
+  const blackoutCoords: [number, number][] = [];
+  let blackoutWon = true;
+  for (let r = 0; r < 5; r++) {
+    for (let c = 0; c < 5; c++) {
+      if (!isMarked(r, c)) {
+        blackoutWon = false;
+      }
+      blackoutCoords.push([r, c]);
+    }
+  }
+
+  switch (pattern) {
+    case 'horizontal_line':
+      return {
+        isWon: horizontalWins.length > 0,
+        patternName: 'Horizontal Line',
+        winningCoordinates: horizontalWins[0] || [],
+      };
+    case 'vertical_line':
+      return {
+        isWon: verticalWins.length > 0,
+        patternName: 'Vertical Line',
+        winningCoordinates: verticalWins[0] || [],
+      };
+    case 'diagonal_line':
+      return {
+        isWon: diag1Won || diag2Won,
+        patternName: 'Diagonal Line',
+        winningCoordinates: diag1Won ? diag1Coords : diag2Coords,
+      };
+    case 'four_corners':
+      return {
+        isWon: fourCornersWon,
+        patternName: 'Four Corners',
+        winningCoordinates: fourCornersWon ? fourCornersCoords : [],
+      };
+    case 'blackout':
+      return {
+        isWon: blackoutWon,
+        patternName: 'Full Card / Blackout',
+        winningCoordinates: blackoutWon ? blackoutCoords : [],
+      };
+    default:
+      return { isWon: false, patternName: 'Unknown Pattern', winningCoordinates: [] };
+  }
+}
+
+export function verifyClaimAuthoritative(
+  card: BingoCard,
+  officialCalledNumbers: number[],
+  requiredPattern: WinningPattern,
+  autoCompleteEnabled: boolean = false,
+  clientMarked?: boolean[][]
+): {
+  valid: boolean;
+  reason: string;
+  diagnostics?: string;
+  winningPatternName?: string;
+  winningCoordinates?: [number, number][];
+} {
+  if (card.isBlocked) {
+    return { valid: false, reason: 'Card is blocked.', diagnostics: 'Card was already flagged as blocked.' };
+  }
+
+  if (!card.isRegistered) {
+    return { valid: false, reason: 'Card is blocked.', diagnostics: 'Card is not registered for the active game session.' };
+  }
+
+  const calledSet = new Set(officialCalledNumbers);
+
+  const verifiedMarked: boolean[][] = [];
+  const uncalledMarkedDetails: string[] = [];
+
+  for (let r = 0; r < 5; r++) {
+    const rowMarked: boolean[] = [];
+    for (let c = 0; c < 5; c++) {
+      const val = card.matrix[r][c];
+      const isCenter = (r === 2 && c === 2) || val === 'FREE';
+      if (isCenter) {
+        rowMarked.push(true);
+      } else {
+        const isCalled = typeof val === 'number' && calledSet.has(val);
+        const isPlayerMarked = Boolean(card.marked?.[r]?.[c] || clientMarked?.[r]?.[c]);
+        const cellCovered = isCalled && isPlayerMarked;
+        rowMarked.push(cellCovered);
+
+        if (isPlayerMarked && !isCalled) {
+          uncalledMarkedDetails.push(`Cell [${r},${c}] (#${val}) marked but NOT called`);
+        }
+      }
+    }
+    verifiedMarked.push(rowMarked);
+  }
+
+  const patternResult = checkWinningPattern(verifiedMarked, requiredPattern);
+  if (!patternResult.isWon) {
+    const diagnosticMsg = `Pattern '${requiredPattern}' not satisfied. Officially called count: ${officialCalledNumbers.length}. ${
+      uncalledMarkedDetails.length > 0 ? `Uncalled marks: ${uncalledMarkedDetails.join(', ')}. ` : ''
+    }Required coordinates for pattern incomplete.`;
+
+    return {
+      valid: false,
+      reason: 'Card is blocked.',
+      diagnostics: diagnosticMsg,
+    };
+  }
+
+  return {
+    valid: true,
+    reason: 'Valid Bingo claim confirmed.',
+    winningPatternName: patternResult.patternName,
+    winningCoordinates: patternResult.winningCoordinates,
+  };
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
